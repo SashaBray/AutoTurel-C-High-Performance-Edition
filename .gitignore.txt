@@ -1,0 +1,6 @@
+AutoTurel.exe
+*.o
+*.a
+*.so
+*.dll
+.vscode/
