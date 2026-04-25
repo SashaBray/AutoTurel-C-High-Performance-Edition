@@ -69,4 +69,4 @@ TimeMs: Computation time (milliseconds).
 [RU] Для максимальной производительности используйте флаг -O3:
 [EN] Use -O3 flag for maximum performance:
 bash
-g++ -O3 AutoTurel.cpp -o AutoTurel.exe
+g++ -O3 AutoTurel.cpp -o AutoTurel.exe"# AutoTurel-C-High-Performance-Edition" 
