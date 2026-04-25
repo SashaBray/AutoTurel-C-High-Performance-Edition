@@ -20,7 +20,7 @@
 ---
 
 ## 🚀 Физические возможности / Physics Features
-- **Standard Drag Functions**: Встроены точные таблицы G1 и G7 с интерполяцией.
+- **Flexible Drag Models**: Поддержка стандартных G1/G7 и загрузка пользовательских таблиц напрямую через аргументы.
 - **Dynamic Atmosphere**: Формула Тетенса для влажности, расчет плотности воздуха и скорости звука от высоты.
 - **Earth Effects**: Учет кривизны Земли (радиальная гравитация) и силы Кориолиса.
 - **Ballistics**: Деривация (гироскопический увод), влияние ветра по 3 осям и баллистический коэффициент.
@@ -51,6 +51,7 @@ AutoTurel.exe ^
   --press 101325 ^
   --lat 55.75 ^
   --north-angle 0.0 ^
+  --drag-table 0.0:0.26,1.0:0.4,4.0:0.3 ^
   --iters 30 ^
   --max-time 180.0 ^
   --high-angle
@@ -77,6 +78,7 @@ AutoTurel.exe ^
 | `--deriv-k` | `0.0001` | [RU] Коэф. деривации / [EN] Derivation coefficient |
 | `--lat` | `55.0` | [RU] Широта / [EN] Latitude |
 | `--north-angle` | `0.0` | [RU] Угол севера / [EN] North-to-X angle |
+| `--drag-table` | `M:Cd,M:Cd...` | **Кастомная драг функция** |
 | `--iters` | `15` | [RU] Число итераций / [EN] Iteration count |
 | `--max-time` | `150` | [RU] Лимит полета (с) / [EN] Max flight time |
 | `--high-angle` | *(flag)* | [RU] Навесной режим / [EN] Enable high-angle mode |
