@@ -7,11 +7,13 @@
 #include <algorithm>
 #include <map>
 
+// Определение PI для компиляторов, где его нет в cmath
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-// --- МАТЕМАТИЧЕСКИЙ ВЕКТОР / VECTOR MATH ---
+// --- СТРУКТУРЫ ДАННЫХ / DATA STRUCTURES ---
+
 struct Vector3 {
     double x, y, z;
     Vector3 operator+(const Vector3& v) const { return {x + v.x, y + v.y, z + v.z}; }
@@ -30,7 +32,16 @@ struct Vector3 {
     }
 };
 
-// --- ТАБЛИЦЫ СОПРОТИВЛЕНИЯ / DRAG TABLES ---
+struct BallisticResult {
+    double pitch;
+    double yaw;
+    double miss;
+    double angMiss;
+    long long timeMs;
+};
+
+// --- ФИЗИЧЕСКИЕ КОМПОНЕНТЫ / PHYSICS COMPONENTS ---
+
 class DragProvider {
 public:
     static double getCd(const std::string& model, double mach) {
@@ -41,13 +52,14 @@ public:
         const auto& table = (tables.count(model)) ? tables.at(model) : tables.at("G1");
         if (mach <= table.front().first) return table.front().second;
         if (mach >= table.back().first) return table.back().second;
-        auto it = std::lower_bound(table.begin(), table.end(), mach, [](const std::pair<double, double>& point, double val) { return point.first < val; });
+
+        auto it = std::lower_bound(table.begin(), table.end(), mach, 
+            [](const std::pair<double, double>& point, double val) { return point.first < val; });
         auto prev = std::prev(it);
         return prev->second + (mach - prev->first) * (it->second - prev->second) / (it->first - prev->first);
     }
 };
 
-// --- ЦЕЛЬ / TARGET ---
 class Target {
 public:
     Vector3 pos, vel, acc;
@@ -69,7 +81,6 @@ public:
     }
 };
 
-// --- СНАРЯД / PROJECTILE ---
 class Projectile {
 public:
     Vector3 pos, vel;
@@ -81,10 +92,12 @@ public:
         double s = std::sin(-nR), c = std::cos(-nR);
         _earthRot = { geoOmega.x * c + geoOmega.y * s, -geoOmega.x * s + geoOmega.y * c, geoOmega.z };
     }
+
     void update(double dt, const std::string& model, double pRad, const Vector3& wind, double tB, double pB, double hum) {
         const double S_std = 0.0005064, M_std = 0.4536;
         Vector3 pCenter = {0, 0, -pRad};
         double alt = (pos - pCenter).length() - pRad;
+        
         double Tc = tB - 0.0065 * alt, Tk = Tc + 273.15;
         if (Tk < 1.0) Tk = 1.0;
         double P = pB * std::pow(Tk / (tB + 273.15), 5.255);
@@ -92,26 +105,97 @@ public:
         double Pv = (hum / 100.0) * Es, Pd = P - Pv;
         double dens = (Pd / (287.05 * Tk)) + (Pv / (461.49 * Tk));
         double sound = std::sqrt(1.4 * 287.05 * Tk);
+
         Vector3 accGravity = Vector3::normalize(pCenter - pos) * 9.81;
         Vector3 relV = vel - wind; double vM = relV.length();
         Vector3 accDrag = (vM > 0.1) ? Vector3::normalize(relV) * -((0.5 * dens * vM * vM * DragProvider::getCd(model, vM/sound) * S_std) / (M_std * _bc)) : Vector3{0,0,0};
         Vector3 accCor = Vector3::cross(_earthRot, vel) * -2.0;
         Vector3 drift = Vector3::cross(vel, accGravity);
         Vector3 accDer = (drift.length() > 1e-6) ? Vector3::normalize(drift) * (vel.length() * _derK) : Vector3{0,0,0};
+
         vel = vel + (accGravity + accDrag + accCor + accDer) * dt;
         pos = pos + vel * dt; time += dt;
     }
 private: double _bc, _derK, _pRadius; Vector3 _earthRot;
 };
 
-// --- ТОЧКА ВХОДА / ENTRY POINT ---
+// --- DLL ИНТЕРФЕЙС / DLL INTERFACE ---
+
+extern "C" {
+    __declspec(dllexport) BallisticResult SolveBallistics(
+        double tx, double ty, double tz, 
+        double vx, double vy, double vz,
+        double ax, double ay, double az,
+        double ox, double oy, double oz,
+        double wx, double wy, double wz,
+        double v0, int iters, bool high,
+        double bc, double derivK, double lat, double nAngle,
+        double temp, double press, double hum, double pRad,
+        const char* dragModel, double convF, double mTime
+    ) {
+        auto startC = std::chrono::high_resolution_clock::now();
+        
+        Vector3 targetPos = {tx, ty, tz}, targetVel = {vx, vy, vz}, targetAcc = {ax, ay, az};
+        Vector3 gunOff = {ox, oy, oz}, wind = {wx, wy, wz};
+        std::string dM = dragModel;
+        
+        Vector3 aimP = targetPos;
+        double p = high ? (45.0 * M_PI / 180.0) : std::asin(std::clamp((tz - oz) / std::max((targetPos - gunOff).length(), 0.1), -1.0, 1.0));
+        double y = std::atan2(ty - oy, tx - ox);
+        double fMiss = 0;
+        Vector3 lastProjPos = gunOff;
+
+        for (int i = 0; i < iters; ++i) {
+            Vector3 sVel = {v0*std::cos(p)*std::cos(y), v0*std::cos(p)*std::sin(y), v0*std::sin(p)};
+            Projectile proj(gunOff, sVel, bc, derivK, lat, nAngle, pRad);
+            Target target(targetPos, targetVel, targetAcc);
+            double dIter = 1e18;
+            while (true) {
+                double altP = (proj.pos - Vector3{0,0,-pRad}).length() - pRad;
+                double altT = (target.pos - Vector3{0,0,-pRad}).length() - pRad;
+                proj.update(0.005, dM, pRad, wind, temp, press, hum);
+                target.update(0.005);
+                double d = (proj.pos - target.pos).length();
+                if (high) { if (proj.vel.z < 0 && altP <= altT) break; }
+                else { if (proj.time > 0.05 && d > dIter) break; dIter = d; }
+                if (proj.time > mTime || altP < -500 || std::isnan(d)) break;
+            }
+            lastProjPos = proj.pos;
+            fMiss = (target.pos - proj.pos).length();
+            if (high) {
+                double d_act = std::sqrt(proj.pos.x*proj.pos.x + proj.pos.y*proj.pos.y);
+                double d_tar = std::sqrt(target.pos.x*target.pos.x + target.pos.y*target.pos.y);
+                double aD = p * 180.0 / M_PI;
+                double D = d_act / (1.0425 - 1.0426 * std::pow(aD / 90.0, 3));
+                double nP = std::pow(std::max(0.0, (1.0426*D - d_tar)*std::pow(90,3)/(1.0426*D)), 1.0/3.0)*M_PI/180.0;
+                p += (nP - p)*convF;
+                y += (std::atan2(target.pos.y, target.pos.x) - std::atan2(proj.pos.y, proj.pos.x))*convF;
+            } else {
+                aimP = aimP + (target.pos - proj.pos) * convF;
+                Vector3 relDir = aimP - gunOff;
+                p = std::asin(std::clamp(relDir.z / std::max(relDir.length(), 0.1), -1.0, 1.0));
+                y = std::atan2(relDir.y, relDir.x);
+            }
+        }
+        
+        Vector3 vT = Vector3::normalize(targetPos - gunOff);
+        Vector3 vP = Vector3::normalize(lastProjPos - gunOff);
+        double fAngM = std::acos(std::clamp(Vector3::dot(vT, vP), -1.0, 1.0)) * 180.0 / M_PI;
+        auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startC).count();
+
+        return { p * 180.0 / M_PI, y * 180.0 / M_PI, fMiss, fAngM, dur };
+    }
+}
+
+// --- КОНСОЛЬНЫЙ ИНТЕРФЕЙС / CONSOLE INTERFACE ---
+
 int main(int argc, char* argv[]) {
-    // Инициализация переменных / Variable init
+    // Дефолтные значения
     Vector3 tp={1000,0,0}, tv={0,0,0}, ta={0,0,0}, gunOff={0,0,0}, wind={0,0,0};
     double v0=820, bc=0.5, derK=0.0001, lat=55, nA=0, pR=6371000, cF=0.8, mT=150, tB=15, pB=101325, hum=50;
-    int iters=15; bool high=false; std::string dM="G1";
+    int iters=15; bool high=false; const char* dM="G1";
 
-    // Парсинг / Parsing
+    // Парсинг аргументов
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--target-pos") sscanf(argv[++i], "%lf,%lf,%lf", &tp.x, &tp.y, &tp.z);
@@ -133,48 +217,17 @@ int main(int argc, char* argv[]) {
         else if (a == "--drag-model") dM = argv[++i];
     }
 
-    auto startC = std::chrono::high_resolution_clock::now();
-    double p = high ? (45.0 * M_PI / 180.0) : std::asin(std::clamp((tp.z - gunOff.z) / (tp - gunOff).length(), -1.0, 1.0));
-    double y = std::atan2(tp.y - gunOff.y, tp.x - gunOff.x);
-    Vector3 aimP = tp; double fMiss=0, fAngM=0;
-    Vector3 lastProjPos = gunOff;
+    // Вызов ядра
+    BallisticResult res = SolveBallistics(
+        tp.x, tp.y, tp.z, tv.x, tv.y, tv.z, ta.x, ta.y, ta.z,
+        gunOff.x, gunOff.y, gunOff.z, wind.x, wind.y, wind.z,
+        v0, iters, high, bc, derK, lat, nA, tB, pB, hum, pR, dM, cF, mT
+    );
 
-    for (int i = 0; i < iters; ++i) {
-        Vector3 sVel = {v0*std::cos(p)*std::cos(y), v0*std::cos(p)*std::sin(y), v0*std::sin(p)};
-        Projectile proj(gunOff, sVel, bc, derK, lat, nA, pR); Target target(tp, tv, ta);
-        double dIter = 1e18;
-        while (true) {
-            double altP = (proj.pos - Vector3{0,0,-pR}).length() - pR;
-            double altT = (target.pos - Vector3{0,0,-pR}).length() - pR;
-            proj.update(0.005, dM, pR, wind, tB, pB, hum); target.update(0.005);
-            double d = (proj.pos - target.pos).length();
-            if (high) { if (proj.vel.z < 0 && altP <= altT) break; }
-            else { if (proj.time > 0.05 && d > dIter) break; }
-            if (proj.time > mT || altP < -500 || std::isnan(d)) break;
-            dIter = d;
-        }
-        lastProjPos = proj.pos;
-        fMiss = (target.pos - proj.pos).length();
-        if (high) {
-            double d_act = std::sqrt(proj.pos.x*proj.pos.x + proj.pos.y*proj.pos.y);
-            double d_tar = std::sqrt(target.pos.x*target.pos.x + target.pos.y*target.pos.y);
-            double aD = p * 180.0 / M_PI;
-            double D = d_act / (1.0425 - 1.0426 * std::pow(aD / 90.0, 3));
-            double nP = std::pow(std::max(0.0, (1.0426*D - d_tar)*std::pow(90,3)/(1.0426*D)), 1.0/3.0)*M_PI/180.0;
-            p += (nP - p)*cF;
-            y += (std::atan2(target.pos.y, target.pos.x) - std::atan2(proj.pos.y, proj.pos.x))*cF;
-        } else {
-            aimP = aimP + (target.pos - proj.pos) * cF;
-            Vector3 relDir = aimP - gunOff;
-            p = std::asin(std::clamp(relDir.z/relDir.length(), -1.0, 1.0));
-            y = std::atan2(relDir.y, relDir.x);
-        }
-    }
-    
-    Vector3 vT = Vector3::normalize(tp - gunOff);
-    Vector3 vP = Vector3::normalize(lastProjPos - gunOff);
-    fAngM = std::acos(std::clamp(Vector3::dot(vT, vP), -1.0, 1.0)) * 180.0 / M_PI;
-    auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - startC).count();
-    std::cout << std::fixed << std::setprecision(4) << p*180/M_PI << ";" << y*180/M_PI << ";" << fMiss << ";" << fAngM << ";" << dur << std::endl;
+    // Вывод результата в формате массива
+    std::cout << std::fixed << std::setprecision(4) 
+              << res.pitch << ";" << res.yaw << ";" << res.miss << ";" 
+              << res.angMiss << ";" << res.timeMs << std::endl;
+
     return 0;
 }
